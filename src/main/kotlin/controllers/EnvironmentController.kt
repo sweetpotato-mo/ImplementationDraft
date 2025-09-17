@@ -107,8 +107,48 @@ class EnvironmentController(
      * Clouds rain, move, merge, and dissipate in ascending order of their IDs.
      */
     private fun startCloudLoop() {
-        for (clouds in clouds.sortedBy { it.id }) {
-            cloudMovement(clouds)
+
+        val cloudsToProcess = clouds.toList().sortedBy { it.id }.toMutableList()
+        for (cloud in cloudsToProcess) {
+
+            cloudLoopHelper(cloud)
+
+        }
+        do{
+            val cloudsAdded = clouds.filterNot { cloudsToProcess.contains(it) }
+            //This list should have the newly added clouds.
+            for (cloud in cloudsAdded){
+                cloudLoopHelper(cloud)
+            }
+            cloudsToProcess+=cloudsAdded
+        }while(cloudsAdded.isNotEmpty())
+
+    }
+
+
+    private fun cloudLoopHelper(cloud: Cloud){
+        // Skip clouds that were already removed (e.g., if a previous cloud merged with this one)
+        // or if they were removed due to rain/village in a previous iteration.
+        if (!clouds.contains(cloud)) {
+            return
+        }
+
+        cloud.setMovementQuota(MAX_MOVEMENT_QUOTA)
+
+        var shouldDissipate = false
+        var canStillMove = true
+
+        while (cloud.movementQuota > 0 && canStillMove && !shouldDissipate) {
+
+            if (cloud.amount >= RAIN_TRIGGER_AMOUNT) {
+                shouldDissipate = rain(cloud)   //make every cloud Rain.
+                if (shouldDissipate) {
+                    break
+                }
+            }
+            // cloudMovement returns false if movement stopped (merge/village/null tile).
+            canStillMove = cloudMovement(cloud)
+
         }
     }
 
@@ -189,7 +229,12 @@ class EnvironmentController(
 
         // Return true if the cloud is now empty (dissipates), false otherwise (survives).
         // shouldDissipate() says amount <= 0 -> true
-        return cloud.shouldDissipate()
+        val shouldDissipate = cloud.shouldDissipate()
+        if (shouldDissipate) {
+            Logger.logCloudDissipation(cloud.id, cloud.location)
+            removeCloud(cloud)
+        }
+        return shouldDissipate
     }
 
     /**
@@ -205,63 +250,37 @@ class EnvironmentController(
 
 
     /**
-     * Moves a cloud along its airflow path for up to 10 tiles, applying per-tile sunlight reduction.
+     * Attempts a single movement step for a cloud along its airflow path.
      *
-     * This function encapsulates the continuous movement sequence for a single cloud within a single
-     * simulation tick, handling sequential actions (move, check for merge, move again) until
-     * a stopping condition is met.
+     * This function handles the initial validity check for the next tile and performs the 3-hour
+     * sunlight reduction and movement logging for the current tile before delegating to the helper.
      *
-     * **This Function's Responsibilities (What We Do Here): **
-     * 0.  **Rain Check**: Checks for rain and stops the cloud if rain occurs.
-     * 1.  **Movement Loop Control**: Executes a `while` loop that continues as long as the cloud's
-     *      `movementQuota` is greater than 0.
-     * 2.  **Stopping Condition - No Path**: Breaks the loop if `nextTile` is null (unspecified tile).
-     * 3. **Stopping Condition - Village**: If `nextTile` is a `VILLAGE` tile, it logs the cloud getting stuck,
-     *      calls `removeCloud(cloud)`, and breaks the loop immediately.
-     * 4.  **Stopping Condition - Merge**: If a `cloudOnNextTile` is found, it calls `merge()`, logs the union,
-     *      removes both original clouds, adds the new one, and breaks the loop, as movement ends after a merge.
-     * 5.  **Sunlight Reduction (3h)**: For every *traversed* `FIELD` or `PLANTATION` tile
-     *      (i.e., the `currentTile` before the move),
-     *      the sunlight is reduced by 3 hours via `currentTile.reduceSunlight(3)`.
-     * 6.  **Movement Logging**: Logs the movement (`logCloudMovement`) and the sunlight reduction
-     *      (`logSunlightAmount`) for the tile being left.
-     * 7.  **Location/Quota Update**: For successful moves (no merge/village/stop), it calls `updateCloudLocation()`
-     *      to update the cloud's position and decrement the quota.
+     * **This Function's Responsibilities (What We Do Here):**
+     * 1.  **Stop Check - No Path**: Returns `false` if `nextTile` is null (unspecified tile), ending movement.
+     * 2.  **Sunlight Reduction (3h)**: Applies the 3-hour sunlight reduction for the *current* tile being traversed.
+     * 3.  **Movement Logging**: Logs the movement (`logCloudMovement`) and sunlight reduction for the tile being left.
+     * 4.  **Delegation**: Delegates the hard-stop logic (Village/Merge) and successful move
+     *      update to `cloudMovementHelper`.
      *
-     * **Deferred Responsibilities (What We Leave Out for Other Functions): **
-     * 1.  **Post-Move/Merge Rain Check**: The check for rain from the newly merged cloud
-     *      (or the successfully moved cloud)
-     *      is deferred to the main `startCloudLoop()` when the entity gets its turn later in the tick
-     *      (as it has a new/higher ID).
-     * 2.  **Final Sunlight Reduction (50h)**: The check for clouds remaining on tiles and the subsequent 50h sunlight
-     *      reduction are deferred to the `finalCloudBehaviour()` function, which runs after all
-     *      cloud movements are complete.
+     * **Deferred Responsibilities (What We Leave Out for Other Functions):**
+     * 1.  **Movement Loop Control**: The `while` loop (quota check and continued movement)
+     *      is handled by `cloudLoopHelper`.
+     * 2.  **Rain Check**: Handled by `cloudLoopHelper`.
+     * 3.  **Final Stop Logic**: Handled by `cloudMovementHelper`.
      *
      * @param cloud The cloud to move.
+     * @return `True` if the cloud successfully moved and can continue, or `False`
+     *      if movement stopped (null path, village, or merge).
      */
-    private fun cloudMovement(cloud: Cloud) {
+    private fun cloudMovement(cloud: Cloud): Boolean {
 
-        cloud.setMovementQuota(MAX_MOVEMENT_QUOTA) //Set the cloud's movement quota to 10 every tick
-
-        var shouldDissipate = false
-        while(cloud.movementQuota > 0){
-
-            if (cloud.amount >= RAIN_TRIGGER_AMOUNT) {
-                shouldDissipate = rain(cloud)
-            }
-            if (shouldDissipate) {
-                Logger.logCloudDissipation(cloud.id, cloud.location)
-                removeCloud(cloud)
-                break
-
-            } else {
 
                 val currentTile = environmentMap.getTileById(cloud.location)
                 val nextTile = environmentMap.getAirflowNeighbour(currentTile)
 
                 if (nextTile == null) {
                     //Cloud has reached its destination
-                    break
+                    return false
 
                 }else{
 
@@ -282,47 +301,71 @@ class EnvironmentController(
                     }
 
 
-                    when (nextTile.getCategory()) {
-                        TileCategory.VILLAGE -> {
-                            //The next tile is a village tile. Cloud should dissipate.
-
-                            Logger.logCloudStuckInVillage(cloud.id, nextTile.id)
-                            removeCloud(cloud)
-                            break
-
-
-
-                        }
-
-                        else -> {
-                            val cloudOnNextTile = lookupCloud(nextTile)
-
-                            if (cloudOnNextTile == null){
-                                updateCloudLocation(cloud, nextTile)
-                                //This should not break the while loop. The loop continues.
-                            }else {
-
-
-                                val newCloud = merge(cloud, cloudOnNextTile)
-
-                                Logger.logCloudMerge(cloud.id, cloudOnNextTile.id, newCloud.id,
-                                    newCloud.amount, newCloud.duration, newCloud.location
-                                )
-
-                                removeCloud(cloudOnNextTile)
-                                removeCloud(cloud)
-                                addCloud(newCloud)
-
-                                break
-                            }
-
-                        }
-                    }
+                    return cloudMovementHelper(nextTile, cloud);
                 }
+
+    }
+
+    /**
+     * Executes the final outcome of a cloud movement attempt.
+     *
+     * This function determines if the cloud will be stopped by a village, stopped by a merge,
+     * or if it will successfully move to the next tile.
+     *
+     * **This Function's Responsibilities (What We Do Here):**
+     * 1.  **Stop Check - Village**: Logs cloud getting stuck, calls `removeCloud`, and returns `false`.
+     * 2.  **Stop Check - Merge**: If a cloud is found on the destination tile, it executes the full merge logic:
+     * calls `merge()`, logs the union, removes original clouds, adds the new one, and returns `false`.
+     * 3.  **Success Condition**: If the tile is empty and non-village, it calls `updateCloudLocation()`
+     *      and returns `true`, allowing the movement loop to continue.
+     *
+     * **Deferred Responsibilities (What We Leave Out for Other Functions):**
+     * 1.  **Sunlight Reduction (3h)**: Handled by `cloudMovement` before this function is called.
+     * 2.  **Movement Logging**: Handled by `cloudMovement` before this function is called.
+     * 3.  **Final Sunlight (50h)**: Deferred to `finalCloudBehaviour()`.
+     *
+     * @param nextTile The tile the cloud intends to move to.
+     * @param cloud The cloud that is moving.
+     * @return `True` if the cloud successfully moved and can continue, or `False` if movement stopped
+     *      (village or merge).
+     */
+
+    private fun cloudMovementHelper(nextTile: Tile, cloud: Cloud): Boolean {
+        when (nextTile.getCategory()) {
+            TileCategory.VILLAGE -> {
+                //The next tile is a village tile. Cloud should dissipate.
+
+                Logger.logCloudStuckInVillage(cloud.id, nextTile.id)
+                removeCloud(cloud)
+                return false
 
 
             }
 
+            else -> {
+                val cloudOnNextTile = lookupCloud(nextTile)
+
+                if (cloudOnNextTile == null) {
+                    updateCloudLocation(cloud, nextTile)
+                    //This should not break the while loop. The loop continues.
+                    return true
+                } else {
+
+
+                    val newCloud = merge(cloud, cloudOnNextTile)
+
+                    Logger.logCloudMerge(
+                        cloud.id, cloudOnNextTile.id, newCloud.id,
+                        newCloud.amount, newCloud.duration, newCloud.location
+                    )
+
+                    removeCloud(cloudOnNextTile)
+                    removeCloud(cloud)
+                    addCloud(newCloud)
+
+                    return false
+                }
+            }
         }
     }
 
@@ -332,7 +375,8 @@ class EnvironmentController(
      * Updates a cloud's state after a successful single-tile movement.
      *
      * **This Function's Responsibilities (What We Do Here): **
-     * 1.  **Update Location**: Sets the cloud's internal `location` property to the `nextTile.id` using the controlled setter.
+     * 1.  **Update Location**: Sets the cloud's internal `location` property to the `nextTile.id`
+     *      using the controlled setter.
      * 2.  **Decrement Quota**: Calls `cloud.decrementMovementQuota()` to track the movement toward the 10-tile limit.
      *
      * **Deferred Responsibilities (What We Leave Out for Other Functions): **
