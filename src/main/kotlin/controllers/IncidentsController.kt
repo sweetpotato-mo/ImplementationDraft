@@ -1,6 +1,7 @@
 package controllers
 
 import incidents.Incident
+import session.TickInfoData
 
 class IncidentController {
     /**

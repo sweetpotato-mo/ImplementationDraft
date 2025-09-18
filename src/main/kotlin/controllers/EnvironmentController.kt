@@ -7,24 +7,30 @@ import data.Cloud.Companion.MAX_MOVEMENT_QUOTA
 import enums.TileCategory
 import loggersingleton.Logger
 import session.TickInfo
+import session.TickInfoData
 import tile.FarmableTile
 import tile.Tile
 import java.io.PrintWriter
 
 class EnvironmentController(
-    private val tickInfo: TickInfo?,
+    private var tickInfo: TickInfoData?,
     private val environmentMap: EnvironmentMap,
     private var clouds: MutableList<Cloud>,
     private var tileIdCloudMap: MutableMap<Int, Cloud>,
-    private var maxCloudId: Int
+    private var maxCloudId: Int //while parsing, please initialize to -1 if there is no cloud in the map. So
+                                //that the first cloud from CloudCreationIncident has id 0.
 ) {
     // A map to store sunlight values for each tick, derived from the specification.
-    private val tickSunlightMap: Map<Int, Int> = mapOf(
-        1 to 98, 2 to 98, 3 to 112, 4 to 112, 5 to 126, 6 to 126, 7 to 140, 8 to 140,
-        9 to 168, 10 to 168, 11 to 168, 12 to 168, 13 to 168, 14 to 168, 15 to 154,
-        16 to 154, 17 to 126, 18 to 126, 19 to 112, 20 to 112, 21 to 98, 22 to 98,
-        23 to 84, 24 to 84
-    )
+    private val tickSunlightMap: Map<Int, Int> = BASE_SUNLIGHT_HOURS
+
+    companion object{
+         val BASE_SUNLIGHT_HOURS : Map<Int, Int> = mapOf(
+            1 to 98, 2 to 98, 3 to 112, 4 to 112, 5 to 126, 6 to 126, 7 to 140, 8 to 140,
+            9 to 168, 10 to 168, 11 to 168, 12 to 168, 13 to 168, 14 to 168, 15 to 154,
+            16 to 154, 17 to 126, 18 to 126, 19 to 112, 20 to 112, 21 to 98, 22 to 98,
+            23 to 84, 24 to 84
+        )
+    }
 
 
 
@@ -35,14 +41,13 @@ class EnvironmentController(
      * 1. Soil moisture reduction.
      * 2. Cloud movement, rain, union, and dissipation.
      *
-     * @param currentYearTick The current tick number within the year (1-24).
      */
-    fun runTick(currentYearTick: Int) {
+    fun runTick() {
         // Step 1: Reduce soil moisture at the beginning of the tick.
         reduceSoilMoisture()
 
         //Intermediate Step, set base sunlight to the monthly average before cloud effects are applied.
-        resetBaseSunlight(currentYearTick)
+        resetBaseSunlight()
 
         // Step 2: Simulate cloud behavior (rain, movement, union, dissipation).
         startCloudLoop()
@@ -62,6 +67,29 @@ class EnvironmentController(
      * @param amount The initial amount of water in the new cloud.
      */
     fun createCloud(tileId: Int, duration: Int, amount: Int) {
+
+        val maxId = ++maxCloudId
+
+        val createdCloud = Cloud(maxId, duration, amount,tileId)
+
+        val theCloudThatWasThere = tileIdCloudMap[tileId]
+
+        if(theCloudThatWasThere != null){
+
+            val newCloud = merge(createdCloud, theCloudThatWasThere)
+
+            Logger.logCloudMerge(
+                createdCloud.id, theCloudThatWasThere.id, newCloud.id,
+                newCloud.amount, newCloud.duration, newCloud.location
+            )
+
+            //We don't log the Incident here. IncidentController will log it.
+
+            addCloud(newCloud)
+            removeCloud(theCloudThatWasThere)
+        }else{
+            addCloud(createdCloud)
+        }
     }
 
     /**
@@ -87,9 +115,9 @@ class EnvironmentController(
     /**
      * Resets the sunlight on all tiles to the monthly average before cloud effects are applied.
      *
-     * @param currentYearTick The current year tick.
+     * will have to use tickInfo to get the current tick.
      */
-    fun resetBaseSunlight(currentYearTick: Int) {
+    fun resetBaseSunlight() {
         TODO("Not yet implemented")
     }
 
@@ -99,33 +127,67 @@ class EnvironmentController(
      * Also logs if the moisture level falls below the plant's required threshold.
      */
     private fun reduceSoilMoisture() {
+        val currentYearTick = tickInfo!!.getCurrentTick()
         TODO("Not yet implemented")
     }
 
+
     /**
      * Manages all cloud-related activities for the current tick.
-     * Clouds rain, move, merge, and dissipate in ascending order of their IDs.
+     * Clouds rain, move, merge, and dissipate in ascending order of their IDs,
+     * processing merged clouds in subsequent turns within the same tick.
      */
     private fun startCloudLoop() {
+        // A Set is used for fast lookup to track processed clouds.
+        val processedClouds = mutableSetOf<Cloud>()
 
-        val cloudsToProcess = clouds.toList().sortedBy { it.id }.toMutableList()
-        for (cloud in cloudsToProcess) {
+        // Process clouds in batches until no new clouds (via merge) are created.
+        do {
+            // 1. Get all clouds not yet processed, sorted by ID (for correct processing order).
+            val cloudsToProcess = clouds
+                .filterNot { processedClouds.contains(it) }
+                .sortedBy { it.id }
+                .toList()
 
-            cloudLoopHelper(cloud)
-
-        }
-        do{
-            val cloudsAdded = clouds.filterNot { cloudsToProcess.contains(it) }
-            //This list should have the newly added clouds.
-            for (cloud in cloudsAdded){
-                cloudLoopHelper(cloud)
+            // 2. Break condition: If no new clouds were created since the last batch, stop.
+            if (cloudsToProcess.isEmpty()) {
+                break
             }
-            cloudsToProcess+=cloudsAdded
-        }while(cloudsAdded.isNotEmpty())
 
+            // 3. Process the new batch.
+            for (cloud in cloudsToProcess) {
+                // Note: Cloud may have been removed if a *previous* cloud merged with it.
+                // cloudLoopHelper handles the check if it still exists.
+                cloudLoopHelper(cloud)
+
+                // Mark cloud as processed for this batch.
+                processedClouds.add(cloud)
+            }
+
+        } while (true)
     }
 
-
+    /**
+     * Executes the entire continuous movement and rain sequence for a single cloud within one tick.
+     *
+     * This function orchestrates the inner 'while' loop, which controls the cloud's actions until
+     * its quota is exhausted or a hard-stop condition is met (dissipation, merge, or null tile).
+     *
+     * **This Function's Responsibilities: **
+     * 1.  **Existence Check**: Ensures the cloud has not already been removed
+     *      (e.g., by a merge from a previous cloud's iteration).
+     * 2.  **Quota Reset**: Resets the cloud's `movementQuota` to `MAX_MOVEMENT_QUOTA` at the start of its turn.
+     * 3.  **Continuous Loop Control**: Executes a `while` loop that continues as long as the
+     *      cloud has movement quota remaining, a valid next move, and has not dissipated.
+     * 4.  **Pre-Move Rain Check**: Checks for and executes rainfall (`rain(cloud)`) before
+     *      attempting movement.
+     * 5.  **Dissipation Handling**: If rain results in dissipation (`shouldDissipate` is true),
+     *      the function logs the dissipation, calls `removeCloud(cloud)`, and terminates the loop for this cloud.
+     * 6.  **Movement/Stop Delegation**: Calls `cloudMovement(cloud)` to attempt a step, which
+     *      handles all complex termination conditions (village, merge, null path).
+     *
+     * @param cloud The cloud to process.
+     */
     private fun cloudLoopHelper(cloud: Cloud){
         // Skip clouds that were already removed (e.g., if a previous cloud merged with this one)
         // or if they were removed due to rain/village in a previous iteration.
@@ -138,11 +200,13 @@ class EnvironmentController(
         var shouldDissipate = false
         var canStillMove = true
 
-        while (cloud.movementQuota > 0 && canStillMove && !shouldDissipate) {
+        while (cloud.movementQuota > 0 && canStillMove) {
 
             if (cloud.amount >= RAIN_TRIGGER_AMOUNT) {
                 shouldDissipate = rain(cloud)   //make every cloud Rain.
                 if (shouldDissipate) {
+                    Logger.logCloudDissipation(cloud.id, cloud.location)
+                    removeCloud(cloud)
                     break
                 }
             }
@@ -229,12 +293,7 @@ class EnvironmentController(
 
         // Return true if the cloud is now empty (dissipates), false otherwise (survives).
         // shouldDissipate() says amount <= 0 -> true
-        val shouldDissipate = cloud.shouldDissipate()
-        if (shouldDissipate) {
-            Logger.logCloudDissipation(cloud.id, cloud.location)
-            removeCloud(cloud)
-        }
-        return shouldDissipate
+        return cloud.shouldDissipate()
     }
 
     /**
@@ -270,7 +329,7 @@ class EnvironmentController(
      *
      * @param cloud The cloud to move.
      * @return `True` if the cloud successfully moved and can continue, or `False`
-     *      if movement stopped (null path, village, or merge).
+     *      if movement stopped (a null path, village, or merge).
      */
     private fun cloudMovement(cloud: Cloud): Boolean {
 
@@ -467,6 +526,27 @@ class EnvironmentController(
      * @param tileId The ID of the tile that has become a village.
      */
     fun villageCreatedAt(tileId: Int) {
+        val tile = environmentMap.getTileById(tileId)
+        if (tile is FarmableTile) {
+            tile.currentSunlight = 0
+            tile.currentMoisture = 0
+            tile.setCategory(TileCategory.VILLAGE)
+        }
+        val cloud = tileIdCloudMap[tileId]
+        if (cloud != null) {
+            removeCloud(cloud)
+        }
+    }
+
+
+
+    /**
+     * Sets the tick information data.
+     *
+     * @param clock The `TickInfoData` object.
+     */
+    fun setTickInfoData(clock: TickInfoData) {
+        this.tickInfo = clock
     }
 }
 

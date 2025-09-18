@@ -16,19 +16,23 @@ data class Coordinate(
 abstract class Tile {
     abstract val id: Int
     abstract val coordinates: Coordinate
-    abstract val category: TileCategory
+    abstract var category: TileCategory
     abstract val farmId: Int?
     abstract val direction: Direction?
 
     fun getCategory(): TileCategory = category
     fun getId(): Int = id
     fun getFarmIdOfTile(): Int? = farmId
+
+    fun setCategory(cat :TileCategory){
+        category = cat
+    }
 }
 
 class FarmableTile(
     override val id: Int,
     override val coordinates: Coordinate,
-    override val category: TileCategory,
+    override var category: TileCategory,
     override val farmId: Int?,
     override val direction: Direction?,
     val moistureCapacity: Int
@@ -65,6 +69,7 @@ class FarmableTile(
      */
     fun commitAction(action: Action, tickInfoData: TickInfoData): Int? {
         // Implementation for committing an action on the tile.
+        return null
     }
 
     /**
@@ -98,7 +103,9 @@ class FarmableTile(
      */
     fun reduceMoistureAndCheckBelowThreshold(): Boolean {
         // Reduces 70L or 100L and also tells if moisture is below threshold.
+        return false
     }
+
 
     /**
      * Reduces the amount of sunlight the tile receives in the current tick.
@@ -135,6 +142,7 @@ class FarmableTile(
      */
     fun getRequiredActions(currentTick: Int): List<Action> {
         // Implementation for determining needed actions based on plant strategy.
+        return emptyList()
     }
 
     /**
@@ -159,13 +167,15 @@ class FarmableTile(
     /**
      * Checks if moisture is below the plant's required threshold.
      */
-    fun isMoistureBelowThreshold(): Boolean = plant != null && currentMoisture < plant!!.getPlantType().preferredMoisture
+    fun isMoistureBelowThreshold(): Boolean =
+        plant != null
+            && currentMoisture < plant!!.getPlantType().preferredMoisture
 }
 
 class UnfarmableTile(
     override val id: Int,
     override val coordinates: Coordinate,
-    override val category: TileCategory,
+    override var category: TileCategory,
     override val farmId: Int?,
     override val direction: Direction?,
     val hasShed: Boolean
